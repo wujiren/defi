@@ -1,236 +1,143 @@
-# 开发计划概览
+# 开发计划概览（修订版 v1.1）
 
-这是一份“策略先行”架构开发计划。该计划将整个系统拆解为五个阶段，通过明确的接口契约实现团队并行开发，让您的量化和 AI 团队能在第一周就投入到策略研发中，而基础设施团队则在底层同步构建安全防线。
+这是一份"策略先行"架构开发计划。该计划将整个系统拆解为五个阶段，通过明确的接口契约实现团队并行开发，让量化和 AI 团队能在第一周就投入到策略研发中，而基础设施团队则在底层同步构建安全防线。
+
+> **v1.1 修订说明：** 本版本修正了以下六项缺失：
+> 1. G1-G4 与 G5-G6 门控顺序错位（G5/G6 需在 G1-G4 之后才具备生产有效性）
+> 2. 策略异常路径（PAUSED / DEPRECATED 状态机）缺少开发任务
+> 3. Admin Web Portal 无明确归属团队与交付阶段
+> 4. Protocol Adapter Registry 未作为独立开发任务
+> 5. MtM 实时估值与未领取奖励扫描模块缺失
+> 6. 可观测性基础设施未提前部署，非功能性指标（两档仿真、SLA）无专项验收
+
+---
 
 ## Phase 0：奠基与契约对齐（并行启动期）
 
-**目标：** 确立系统的“通用语言”与物理边界，消除跨模块开发时的阻塞。
-**参与团队：** 全体架构师、DevOps、DBA
+**目标：** 确立系统的"通用语言"与物理边界，消除跨模块开发时的阻塞。**同步部署可观测性基础设施，确保后续阶段有度量手段。**
+**参与团队：** 全体架构师、DevOps、DBA、财务风控组
 
 * **任务 1：接口契约固化**
-* 编译并分发 `common.proto`、`trading.proto` 和 `data_stream.proto`。明确 `BigAmount` 必须使用 `string` 传输 Wei 级别的原始整数，严禁浮点数过境。
-
+  编译并分发 `common.proto`、`trading.proto` 和 `data_stream.proto`。明确 `BigAmount` 必须使用 `string` 传输 Wei 级别的原始整数，严禁浮点数过境。
 
 * **任务 2：存储底座搭建**
-* 在 PostgreSQL 中拉起核心 Schema：`trade_tasks`、`nonce_locks`、`ledger_entries`。
-* 部署 Redis Cluster，创建 `stream:chain:events` Topic。
-
+  在 PostgreSQL 中拉起核心 Schema：`trade_tasks`、`nonce_locks`、`ledger_entries`、`accounts`、`asset_balances`。部署 Redis Cluster，创建 `stream:chain:events` 和 `stream:internal:accounting` 两个 Topic。
 
 * **任务 3：三区网络隔离**
-* 划分 Zone A（策略区）、Zone B（验证区）和 Zone C（签名区）的 VPC 与 Docker 网络。
+  划分 Zone A（策略区）、Zone B（验证区）和 Zone C（签名区）的 VPC 与 Docker 网络；生成内部 Root CA，签发 mTLS 证书体系。
 
+* **任务 4：可观测性基础设施部署** *(新增)*
+  部署 Prometheus + Alertmanager + Grafana + Loki 全套可观测性栈。配置各服务 `/metrics` 抓取端点，建立 16 条核心告警规则的初始框架，确保 Phase 1 起各阶段的开发质量有数据支撑。
 
+* **任务 5：制造假通道（Mocking）解除阻塞**
+  各团队 Tech Lead 协作，交付 Zone B 假 gRPC Server、Zone C 假签名服务、假数据推送脚本，让 Phase 1 各团队可以立即并行开工。
 
-## Phase 1：策略大脑与回测闭环（AI 投研期）
+---
 
-**目标：** 优先让核心策略逻辑跑通。在 AI Agent 平台架构下，聚焦于将历史数据喂给策略模型，完成无未来函数（Zero Look-Ahead）的评估。
-**参与团队：** AI/策略组、数据工程组
+## Phase 1：策略大脑与回测预评估（AI 投研期）
+
+**目标：** 优先让核心策略逻辑跑通，同时完成 G1 静态分析门控与 Adapter Registry 基础框架。**注意：本阶段的 G5/G6 为"预评估"，不具备生产有效性，须在 Phase 2 完成 G1-G4 后重跑才算正式通过。**
+**参与团队：** AI/策略组、数据工程组、区块链底层组（Adapter Registry 部分）
 
 * **任务 1：历史数据归档管道**
-* 开发 `Archiver` 服务，将链上 Tick 数据（如 Swap、Mint、Burn）沉淀为 Parquet 格式，并存入 ClickHouse 索引。
+  开发 `Archiver` 服务，沉淀 Parquet 格式历史数据；实现零 Look-Ahead 的 `IDataProvider` 接口。
 
+* **任务 2：G1 静态分析门控** *(新增)*
+  实现策略代码的 AST 静态扫描工具：检测直接 RPC 调用、浮点金额传输、invariants 为空等违规模式。这是所有安全门控的第一关，须在策略进入回测前通过。
 
-* **任务 2：回测数据接口**
-* 实现 `IDataProvider` 接口，确保策略在任意时间点只能获取当时及之前的截面数据。
+* **任务 3：Adapter Registry 基础框架** *(新增)*
+  开发协议适配器注册表（Adapter Registry），包含注册、查询、状态标记（ACTIVE / HIGH_RISK / SUSPENDED）接口。这是白名单校验、治理哨兵和时间锁联动的共同基础。
 
+* **任务 4：Python Agent 基类与首个策略**
+  封装 `BaseStrategyAgent`；针对 CLAMM 等策略编写 `generate_proposals` 并跑通 G5/G6 **预评估**（数据作为基准存档，不作为上线凭据）。
 
-* **任务 3：Python Agent 基类与首个策略**
-* 封装 `BaseStrategyAgent`，处理好事件监听与精度转换。
-* 利用该基类，优先针对 Concentrated Liquidity Automated Market Maker (CLAMM) 等复杂做市逻辑或收益聚合策略，编写第一版 `generate_proposals` 代码并跑通 G5（回测）与 G6（蒙特卡洛）关卡。
-
-
+---
 
 ## Phase 2：核心引擎与数学对齐（沙盒校准期）
 
-**目标：** 消除 Python 策略环境与真实 EVM 之间的误差。此阶段只做链下仿真，用 Mock 替代真实的签名和广播。
-**参与团队：** 区块链底层开发组
+**目标：** 消除 Python 策略环境与真实 EVM 之间的误差。完成 G1-G4 全部安全门控，并在此基础上正式通过 G5/G6 绩效门控。**同步交付 Admin Web Portal 和 MtM 实时估值模块。**
+**参与团队：** 区块链底层开发组、财务风控组、AI 策略组
 
-* **任务 1：Go EVM 仿真器**
-* 基于 `go-ethereum/core/vm` 实现轻量级 StateDB 仿真。
-* 运行 G2 验证，确保 Python 端输出的 CLAMM 策略执行参数在 Go 端模拟计算时达到位级对齐（零误差）。
+* **任务 1：Go EVM 仿真器（两档模式）** *(修订)*
+  基于 `go-ethereum/core/vm` 实现 StateDB 仿真，须同时支持两档模式：
+  - **轻量仿真**（常规交易）：仅验证不变性断言，P99 < 80ms
+  - **完整仿真**（大额 / 首次执行）：完整 Anvil 模拟，P99 < 250ms
+  完整仿真触发条件：单笔 > 策略资金 15%、策略首次执行、或处于 STAGED 状态。
 
+* **任务 2：G2/G3/G4 安全门控**
+  通过 G2（500 组随机输入位级对齐）、G3（不变性断言全量拦截）、G4（1000 轮极端 Fuzzing）。G1-G4 全部通过后，策略方可进入 VALIDATED 状态。
 
-* **任务 2：gRPC 代理与不变性断言**
-* 打通 Zone A 到 Zone B 的 `ExecuteTrade` RPC 通信。
-* 实现最大滑点、最大回撤等风控物理底线的断言拦截。
+* **任务 3：G5/G6 正式绩效评估** *(修订)*
+  在 G1-G4 通过后重跑历史回测（G5）与蒙特卡洛（G6），此次结果具备生产有效性，可作为上线凭据。
 
+* **任务 4：Admin Web Portal** *(新增)*
+  由 AI/策略组 Web 方向开发，部署于 Zone A。承担：PENDING_APPROVAL 审批队列展示与放行/拒绝操作、策略状态总览、Kill Switch 入口。Phase 3 影子模式上线前必须可用。
 
-* **任务 3：G4 极端模糊测试**
-* 注入 Gas 飙升、流动性枯竭等极端参数，进行 1000 轮压力测试。
+* **任务 5：MtM 实时估值与奖励扫描** *(新增)*
+  由财务风控组实现 `MtMCalculator`（每区块更新 NAV）和 `RewardScanner`（每 5-10 分钟扫描未领取奖励），两者均计入 NAV，为实时 MDD 监控提供准确基准。
 
-
+---
 
 ## Phase 3：实时数据与影子模式（虚拟实盘期）
 
-**目标：** 接入真实的实时网络，但在最后一步物理截断，完成 G7 影子模式的端到端演练。
-**参与团队：** 后端业务组、财务核算组
+**目标：** 接入真实的实时网络，完成 G7 影子模式的端到端演练。**同步实现策略异常路径（PAUSED / DEPRECATED）和 NFR 专项验收。**
+**参与团队：** 后端业务组、财务核算组、架构/SRE 组、区块链底层组
 
 * **任务 1：实时链上事件推送**
-* 开发 `Chain-Adapter` 接入 RPC，`Data-Processor` 强制注入 `last_sync_block` 水位线标签，写入 Redis Stream。
-
+  开发 `Chain-Adapter` 接入 RPC，`Data-Processor` 强制注入 `last_sync_block` 水位线标签，写入 Redis Stream。
 
 * **任务 2：水位线与预言机熔断**
-* 实现 `Sync Sentinel` 硬拦截过期请求。
-* 上线三源预言机（Triple-Oracle Guard），偏差超 0.5% 立即熔断。
+  实现 `Sync Sentinel` 硬拦截过期请求；上线三源预言机，偏差超 0.5% 立即熔断。
 
+* **任务 3：PAUSED / DEPRECATED 异常路径** *(新增)*
+  实现策略生命周期的完整异常路径，包括：
+  - 自动触发 PAUSED 的 7 条规则（实时 MDD 超限、治理哨兵告警、连续亏损等）
+  - PAUSED → LIVE 的人工确认恢复流程
+  - DEPRECATED 的自动退役条件（适配器失效、熔断超次数上限）及资金归还、数据归档流程
 
-* **任务 3：影子状态机与对账基础**
-* 实现 FSM 的 `INIT -> SIMULATED` 路径，截断 `SIGNED`。
-* 上线双分录会计系统（Double-Entry Ledger），开始记录影子模式下的虚拟 PnL。
+* **任务 4：影子状态机与对账基础**
+  实现 FSM 的 `INIT → SIMULATED` 路径，截断 `SIGNED`；上线双分录会计系统，开始记录影子模式下的虚拟 PnL。
 
+* **任务 5：NFR 专项验收** *(新增)*
+  由 SRE 组主导，针对非功能性量化指标进行专项压测：
+  - 50+ Agent 并发时端到端 P99 延迟 < 500ms（轻量路径）/ < 680ms（完整路径）
+  - 核心链路可用性 ≥ 99.9%/月（混沌工程验证）
+  - 历史数据可复现性 100%（数据哈希校验）
 
+---
 
 ## Phase 4：安全装甲与飞轮迭代（生产就绪期）
 
-**目标：** 补齐全套安全设施，处理防夹与资金管控，激活系统自我学习能力。
-**参与团队：** 安全工程组、智能合约组、AI组
+**目标：** 补齐全套安全设施，处理防夹与资金管控，激活系统自我学习能力，完成外部安全审计。
+**参与团队：** 安全工程组、智能合约组、AI 组、第三方审计机构
 
 * **任务 1：Zone C 物理签名与大额审批**
-* 部署 Zone C 的 mTLS 白名单代理，对接真实的 MPC 节点。
-* 实现在 STAGED 阶段与 LIVE 阶段差异化的大额人工审批逻辑。
-
+  部署 Zone C 的 mTLS 白名单代理，对接真实的 MPC 节点；实现 STAGED 阶段（绝对金额 $10,000）与 LIVE 阶段（相对比例 15%）差异化的大额人工审批逻辑；上线 Kill Switch 绿色通道（绕过审批阈值的紧急提款路径）。
 
 * **任务 2：确定性广播与防夹**
-* 实现 FSM 的 `Recovery Manager`（自愈管理器），处理进程崩溃后的状态恢复与 Nonce 锁释放。
-* 上线 `MEV Router`，将高价值交易路由至 Flashbots 防御三明治攻击。
-
+  实现 FSM 的 `Recovery Manager`；上线 `MEV Router`，将高价值交易路由至 Flashbots。
 
 * **任务 3：断路器与 AI 反馈飞轮**
-* 部署治理风险哨兵、24 小时时间锁与全局 Kill Switch。
-* 通过审计模块计算软滑点与毒性流，将其转化为 Prompt 注入 Vector DB，驱动策略迭代。
-
-# 开发团队建设
-
-## 第一部分：团队建制与模块责任矩阵（优化版）
-
-整个研发团队分为 **6 个内部跨职能小队 (Squads)** 和 **1 个外部协作方**。
-
-### 1. 系统架构与 SRE 组 (Architecture, SRE & Chaos)
-
-*系统的“基建狂魔”与“破坏者”，保障基础设施与抗脆弱性。*
-
-* **人员画像**：资深架构师、云原生网络专家、**SRE / 混沌工程师**。
-* **核心职责**：
-* 统筹全局 `Protobuf` 契约（`common.proto` 等）与数据库 Schema。
-* 搭建 Zone A/B/C 三区网络隔离、VPC 与 Docker 安全组。
-* **混沌工程（新增）**：在影子模式和灰度阶段，专职负责“拔网线”、强制 Kill 掉 Go 进程、注入脏数据，验证 FSM 状态机的 15 秒自愈能力与“零重复执行”指标。
-
-
-
-### 2. AI 与量化策略组 (Zone A: Intelligence Squad)
-
-*系统的“大脑”，负责赚钱逻辑和认知进化。*
-
-* **人员画像**：量化研究员、AI 算法工程师、Python 后端开发。
-* **核心职责**：
-* 维护 `BaseStrategyAgent`，处理所有策略的样板代码。
-* 开发 CLAMM 动态做市等高频策略，跑通 G5/G6 历史回测与蒙特卡洛评估。
-* 打通 Vector DB，将历史毒性流和滑点数据转化为大模型优化 Prompt，驱动 AI 反馈飞轮。
-
-
-
-### 3. 区块链底层与执行组 (Zone B: Execution Squad)
-
-*系统的“脊梁”，解决并发、执行确定性与黑暗森林博弈。*
-
-* **人员画像**：资深 Go 语言工程师、EVM 底层专家、**专职 MEV 研究员**。
-* **核心职责**：
-* 开发 StateDB 内存仿真器，实现 Python 与 Solidity 的位级精度对齐（G2 门控）。
-* 开发核心的**幂等状态机 (FSM)** 与 Nonce 行级锁。
-* **防夹与路由（新增）**：MEV 研究员专职负责 `MEV Router` 的策略调优，监控 Mempool 毒性流特征，动态制定 Flashbots Bundle 竞价策略与 Gas 阶梯加速方案。
-
-
-
-### 4. 数据工程组 (Data Pipeline Squad)
-
-*系统的“眼耳神经”，负责数据摄取与历史归档。*
-
-* **人员画像**：数据开发工程师、Redis/ClickHouse 专家。
-* **核心职责**：
-* 开发 `Chain-Adapter` 与 `Data-Processor`，为事件注入 `last_sync_block` 水位线。
-* 开发 `Archiver` 归档服务与 `IDataProvider` 接口，支撑零 Look-Ahead 的历史回测。
-* **数据连续性保障（对账协同）**：作为对账的底层支撑，负责确保 WebSocket 流不漏推、链重组事件被正确感知。
-
-
-
-### 5. 财务风控与治理组 (Finance & Risk Squad)
-
-*系统的“大管家”，确保账实相符，风险可控。*
-
-* **人员画像**：金融账本开发专家、DeFi 风控研究员。
-* **核心职责**：
-* 维护 `ledger_entries`，实现双分录会计系统（Double-Entry Ledger）。
-* 实现三源预言机校验、跨链资金（Saga 模式）回滚及水位线硬熔断 (`Sync Sentinel`)。
-* **对账第一责任人（对账协同）**：编写核查逻辑。触发 `diff != 0` 告警时，财务组首当其冲排查账本逻辑；若确认逻辑无误，交由数据组排查底层事件丢失情况。
-
-
-
-### 6. 极高安全组 (Zone C: Security Squad) & 外部审计
-
-*系统的“保险箱”，掌握资金生杀大权。*
-
-* **人员画像**：系统底层安全工程师、密码学专家 + **第三方独立审计机构 (External Auditors)**。
-* **核心职责**：
-* 部署 Zone C 的 mTLS 白名单代理与 MPC 节点。
-* 部署 24 小时管理员时间锁合约与 Kill Switch。
-* **独立审计（新增）**：在实盘资金注入前，交由第三方审计机构（如 Trail of Bits 等）对 Zone C 白名单代理源码、智能合约进行安全审计。
-
-
+  部署治理风险哨兵（联动 Adapter Registry 状态）、24 小时时间锁与全局 Kill Switch；通过审计模块计算软滑点与毒性流，将其转化为 Prompt 注入 Vector DB，驱动策略迭代。
 
 ---
 
-## 第二部分：“策略先行”五阶段开发计划（Timeline）
+## 开发团队建设
 
-### Phase 0：奠基与契约对齐（并行启动期）
-
-**目标：确立系统的“通用语言”与物理边界，消除阻塞。**
-
-* **架构组/SRE**：分发全套 Protobuf 契约（确立 `string` 传输 Wei 金额的铁律）；拉起 PostgreSQL 核心表与 Redis Cluster。
-* **里程碑**：各团队拿到本地可运行的 Mock 环境。
-
-### Phase 1：策略大脑与回测闭环（AI 投研期）
-
-**目标：AI 团队直接下场，跑通历史数据回测（零真实链上交互）。**
-
-* **数据工程组**：开发 `Archiver` 将数据写入 Parquet，实现 `IDataProvider` 接口供回测调用。
-* **AI 策略组**：基于 `BaseStrategyAgent` 编写第一批高频做市或资管策略，跑通 G5（回测）与 G6（蒙特卡洛）门控。
-* **里程碑**：产生第一份达到 Sharpe Ratio ≥ 1.0 标准的结构化策略报告。
-
-### Phase 2：核心引擎与数学对齐（沙盒校准期）
-
-**目标：消除 Python 与真实 EVM 间的误差，跑通核心状态机流转。**
-
-* **区块链底层组**：开发 Go StateDB 仿真器；实现 FSM (`INIT -> SIMULATED`)，使用 Mock 模拟签名。
-* **财务风控组**：实现最大滑点、回撤等“不变性断言”（G3 门控）。
-* **里程碑**：策略的输出在 Go 仿真器中实现位级对齐（G2）；通过 1000 轮极端 Fuzzing 测试（G4）。
-
-### Phase 3：虚拟实盘与混沌测试（影子模式期）
-
-**目标：接入实时数据，引入破坏性测试，跑通虚拟对账。**
-
-* **数据工程组**：`Chain-Adapter` 接入真实 RPC，注入水位线推入 Redis。
-* **财务风控组**：上线双分录账本，核算影子 PnL；激活 `Sync Sentinel` 水位线熔断与三源预言机校验。
-* **架构组/SRE（混沌工程）**：在影子运行期间（G7门控），持续对 FSM 容器进行 Kill、断网测试，验证自愈管理器的能力。
-* **里程碑**：策略在真实市场数据下稳定运行 ≥ 72 小时，假设收益与回测偏差 ≤ 15%。
-
-### Phase 4：安全装甲与飞轮迭代（生产就绪期）
-
-**目标：真金白银上线，防夹路由就绪，AI 形成自学习闭环。**
-
-* **极高安全组**：上线 Zone C 白名单代理与 MPC 签名，引入**第三方审计团队**进行安全签核。
-* **区块链底层组**：MEV 研究员主导上线 `MEV Router`，开始向 Flashbots 发送真实交易，调优 Gas 策略。
-* **AI 策略组 & 财务风控组**：财务组生成软滑点与毒性流审计数据，AI 组将其转化为 Prompt 注入 Vector DB，驱动策略进入下一代迭代。
-* **里程碑**：走完 STAGED（预上线审批）与 LIVE（生产自动签名），系统完成全形态进化。
+（详见 `team_overall.md`）
 
 ---
 
-## 第三部分：跨团队协作的“防扯皮”契约红线
+## 跨团队协作的"防扯皮"契约红线
 
 在执行上述计划时，管理层必须严格捍卫以下规则：
 
-1. **对账事故的工单流转（Finance vs Data）**
-任何对账告警 (`diff != 0`)，工单第一处理人绝对是**财务风控组**。财务组必须先提供证据证明“双分录借贷逻辑”无误，才能将工单转给**数据工程组**去抓包排查 RPC 漏推。
-2. **API 修改的“一票否决”**
-`trading.proto` 和 `data_stream.proto` 是跨栈协作的根本。任何模块（即使是为了修复 Bug）如果试图在 Proto 中私自新增字段、或者想将 Wei 金额改为 `float` 传输，架构组拥有一票否决权。
-3. **Zone C 的“不信任”原则**
-无论 Go-Execution-Engine (Zone B) 测试得多么完美，安全组 (Zone C) 必须假设 Zone B 是**可能被攻陷的**。Zone C 必须强制接收**明文 Payload** 并独立在内网重新计算 Hash，绝不接受直接传过来的 Hash 值进行签名。
+1. **门控顺序不可颠倒**：G5/G6 的"预评估"结果不得用于上线申请。只有 G1-G4 全部通过后的正式评估报告，才是策略进入 VALIDATED 状态的凭据。
+
+2. **对账事故的工单流转（Finance vs Data）**：任何对账告警（`diff != 0`），工单第一处理人绝对是**财务风控组**。财务组必须先提供证据证明"双分录借贷逻辑"无误，才能将工单转给**数据工程组**。
+
+3. **API 修改的"一票否决"**：`trading.proto` 和 `data_stream.proto` 是跨栈协作的根本。任何私自新增字段或将 Wei 金额改为 `float` 传输的尝试，架构组拥有一票否决权。
+
+4. **Zone C 的"不信任"原则**：无论 Zone B 测试得多完美，Zone C 必须假设 Zone B 可能被攻陷，强制接收明文 Payload 并独立在内网重新计算 Hash，绝不接受直接传来的 Hash 值进行签名。
+
+5. **Adapter Registry 是白名单的唯一来源**：Zone C Whitelist Proxy 的合约白名单必须从 Adapter Registry 读取，任何绕过 Registry 直接硬编码合约地址的做法视为安全违规。
